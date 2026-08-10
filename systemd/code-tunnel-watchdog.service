@@ -1,0 +1,7 @@
+[Unit]
+Description=VS Code tunnel watchdog (偵測 CLI 就地更新造成的雙 host 僵局)
+Documentation=file://@REPO@/README.md
+
+[Service]
+Type=oneshot
+ExecStart=@REPO@/bin/tunnel-watchdog.sh
