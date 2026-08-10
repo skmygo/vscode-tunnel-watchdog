@@ -41,7 +41,7 @@ cd vscode-tunnel-watchdog
 | CLI 資料目錄 | `~/.vscode/cli/` |
 | 註冊檔（名稱、tunnel ID 都在這） | `~/.vscode/cli/code_tunnel.json` |
 | systemd unit | `code-tunnel.service`（user scope，`code tunnel service install` 產生） |
-| 認證 token | 系統 keyring |
+| 認證 token | 系統 keyring；keyring 鎖住時自動退回 `~/.vscode/cli/token.json`（600） |
 | Linger | `yes` — 未登入、重開機後服務照樣起來（install.sh 會設） |
 | Watchdog | `code-tunnel-watchdog.timer`，每 15 分鐘一次 |
 
@@ -112,6 +112,8 @@ systemctl --user list-timers code-tunnel-watchdog.timer
 ```bash
 # 1. host 行程數 — 正常恆為 1，出現 2 就是雙 host 僵局
 pgrep -af 'tunnel service internal-run'
+#   多出來的那行如果不是 ~/code，是 pgrep 匹配到你自己這條指令，不算數
+#   （watchdog 是用 /proc/<pid>/exe 認的，不會被這種假象騙到）
 
 # 2. 跑的映像跟磁碟上是否一致
 P=$(systemctl --user show code-tunnel.service -p MainPID --value)
@@ -134,6 +136,10 @@ journalctl --user -u code-tunnel.service --no-pager -n 200 | grep NoAttachedServ
   後面，那是關分頁／重整時的正常收尾，不是問題。
 - `Extension Host Process exited with code: 0` 同理，是 `--enable-remote-auto-shutdown`
   在沒人連線時收掉 server。下次連線會自動重開。
+- 登入時的 `Failed to update keyring with new credentials: ... IsLocked` 不是問題。
+  沒有桌面 session 的機器 keyring 本來就是鎖著的，CLI 會自動改存
+  `~/.vscode/cli/token.json`，功能完全一樣（對 headless 機器反而更穩，
+  不必為了讀 token 去解 keyring）。
 
 ---
 
@@ -174,6 +180,10 @@ journalctl --user -u code-tunnel.service --no-pager -n 200 | grep NoAttachedServ
 |---|---|---|
 | 1 預防 | `/proc/<pid>/exe` 帶 `(deleted)` **且** 目前沒有 tunnel session | 趁空檔 restart |
 | 2 搶救 | host 行程數 > 1 | 已經壞了，直接 restart |
+
+host 行程數是逐一比對 `/proc/<pid>/exe` 是不是 `~/code` 算出來的，不是只看 cmdline —
+否則任何提到 `tunnel service internal-run` 這串字的指令都會被算成一個 host，
+誤判成僵局而白白 restart（規則 2 不看有沒有人連線，會直接把你踢掉）。
 
 規則 1 的「沒人連線」判斷是看 `~/.vscode/cli/servers/*/bin/code-server` 有沒有在跑。
 **有 session 在用時不會打斷你**，只記一行 log 等下一輪。

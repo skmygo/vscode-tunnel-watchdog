@@ -45,8 +45,19 @@ fi
 stale_binary=0
 [[ "$exe" == *"(deleted)" ]] && stale_binary=1
 
-# host 行程數；正常恆為 1
-host_count=$(pgrep -fc -- "$HOST_PATTERN" 2>/dev/null) || host_count=0
+# host 行程數；正常恆為 1。
+# 只認 /proc/<pid>/exe 真的指向 CLI binary 的行程 — 光比對 cmdline 會把「碰巧
+# 提到這個字串的指令」也算進來（例如故障排除那行 pgrep 被包在 sh -c 裡跑），
+# 誤判成雙 host 就會白白 restart，把正在用的 session 踢掉。
+count_hosts() {
+	local n=0 p target
+	for p in $(pgrep -f -- "$HOST_PATTERN" 2>/dev/null); do
+		target=$(readlink "/proc/$p/exe" 2>/dev/null) || continue
+		[[ "${target% (deleted)}" == "$HOME/code" ]] && ((++n))
+	done
+	printf '%s' "$n"
+}
+host_count=$(count_hosts)
 
 # 目前是否有人連著（tunnel 的 code-server 有在跑就代表有 session）
 if pgrep -f -- "$SERVER_PATTERN" >/dev/null 2>&1; then
@@ -91,6 +102,6 @@ systemctl --user restart "$UNIT"
 sleep 5
 
 new_pid=$(systemctl --user show "$UNIT" -p MainPID --value 2>/dev/null)
-new_count=$(pgrep -fc -- "$HOST_PATTERN" 2>/dev/null) || new_count=0
+new_count=$(count_hosts)
 log "重啟完成：MainPID=$new_pid host_count=$new_count"
 "$HOME/code" tunnel status 2>&1 | head -1
