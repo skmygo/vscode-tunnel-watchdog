@@ -20,22 +20,76 @@ tunnel 本體是 VS Code 官方 CLI 的功能。這個 repo 附帶的是**讓它
 
 ## 部署到新機器
 
+> 這一節是寫給「照著做就能裝完」的對象用的（包括 AI 代理人）：
+> 先跑前置檢查 → 部署 → 逐項驗收。每一步都附了預期輸出，對不上就停下來問人。
+
+### 0. 前置檢查
+
+```bash
+uname -m                            # 支援 x86_64 / aarch64，其他架構要自己找 CLI
+df -T "$HOME" | tail -1             # ext4 / xfs / btrfs 可以釘住 binary；zfs、overlayfs 不行
+sudo -n true && echo "sudo 免密碼 OK" || echo "sudo 需要密碼 → 見下方「沒有 sudo 的機器」"
+systemctl --user is-system-running  # user systemd 要能動（running 或 degraded 都算可以）
+```
+
+### 1. 部署
+
 ```bash
 git clone https://github.com/skmygo/vscode-tunnel-watchdog.git
 cd vscode-tunnel-watchdog
-./deploy.sh <機器名>     # 機器名 = 網址最後一段，每台要唯一
+./deploy.sh <機器名>     # 機器名 = 網址最後一段，每台要唯一，不能跟現有的重複
 ```
 
 `deploy.sh` 做的事（也可以自己逐步跑）：
 
 1. 沒有 `~/code` 就下載 VS Code CLI（依架構挑 x64 / arm64 靜態版）
-2. 沒登入就走 GitHub device-code 登入，照畫面指示操作
-   （用哪個 GitHub 帳號登入，之後就只有那個帳號能連進來；建議開 2FA — 見安全邊界）
+2. 沒登入就走 GitHub device-code 登入
 3. `~/code tunnel service install --accept-server-license-terms --name <機器名>`
-4. `./install.sh` 裝 watchdog ＋ 啟用 linger
+4. `./install.sh` 裝 watchdog ＋ 受控更新 timer ＋ 釘住 `~/code` ＋ 啟用 linger
+
+> **第 2 步需要真人。** device-code 登入會印出一組網址和代碼，要人去瀏覽器貼。
+> AI 代理人跑到這裡請把畫面上的網址與代碼原樣交給使用者，等對方完成再繼續。
+> 用哪個 GitHub 帳號登入，之後就只有那個帳號能連進來；建議開 2FA（見安全邊界）。
+
+### 2. 驗收
+
+五項全過才算裝好：
+
+```bash
+~/code tunnel status
+#   → "tunnel":"Connected"
+
+lsattr -d ~/code
+#   → 屬性欄要有 i（例：----i---------e------- /home/sk/code）
+
+<repo>/bin/tunnel-watchdog.sh --dry-run
+#   → host_count=1 session_active=0 pinned=yes
+#   → 不動作：正常
+
+systemctl --user is-active code-tunnel-watchdog.path
+#   → active
+
+systemctl --user list-timers code-tunnel-watchdog.timer code-tunnel-update.timer
+#   → 兩個 timer 都列得出來，NEXT 有時間
+```
 
 完成後入口就是 `https://vscode.dev/tunnel/<機器名>`。
 之後想改名：`~/code tunnel rename <新名稱>`（網址跟著變）。
+
+### 已經裝過舊版的機器
+
+```bash
+cd <repo> && git pull && ./install.sh
+```
+
+`install.sh` 是冪等的：重跑會重新產生 unit、重新啟用 timer/path、把 `~/code` 釘住。
+改過 `systemd/` 底下的模板之後也是重跑它來套用。跑完一樣照上面第 2 節驗收。
+
+### 沒有 sudo 的機器
+
+釘不住 binary（`chattr +i` 需要 root），`install.sh` 會印警告然後繼續 —— watchdog
+和 timer 照裝，只是少了「不讓它發生」那一層，退回成「發生後秒級收拾」。
+想明確跳過釘住這步：`./install.sh --no-pin`。
 
 ### 部署完成後這台機器上的東西
 
