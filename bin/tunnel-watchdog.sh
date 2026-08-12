@@ -47,12 +47,15 @@ if [[ -z "$exe" ]]; then
 	exit 0
 fi
 
-# binary 被就地換掉後，常駐行程的 exe 就不再指向 ~/code，實際看過兩種形式：
-#   ~/code (deleted)                      直接被 unlink
-#   /tmp/.tmpXXXX/old-code-cli (deleted)  先搬走再刪（1.132 系列是這個）
-# 所以判準是「不等於 ~/code」，只看有沒有 (deleted) 會漏掉後者。
+# binary 被就地換掉後，常駐行程的 exe 就不再是乾淨的 ~/code，實測過兩種形式：
+#   ~/code (deleted)                      原地 unlink（rename 蓋上去就是這個）
+#   /tmp/.tmpXXXX/old-code-cli (deleted)  先搬走再刪（1.132 系列的自我更新）
+#
+# 所以判準就是「exe 不是原字串 ~/code」，兩種都涵蓋。
+# 不要先剝掉 " (deleted)" 再比 — 那樣第一種會被還原成 ~/code 而判成正常；
+# 也不要只看結尾有沒有 " (deleted)" — 那樣第二種若哪天不帶後綴就會漏。
 stale_binary=0
-[[ "${exe% (deleted)}" != "$CLI" ]] && stale_binary=1
+[[ "$exe" != "$CLI" ]] && stale_binary=1
 
 scan_service
 pinned=no
