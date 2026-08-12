@@ -1,0 +1,8 @@
+[Unit]
+Description=受控更新 VS Code CLI（停 → 換 → 起，不讓它自己就地換）
+Documentation=file://@REPO@/README.md
+
+[Service]
+Type=oneshot
+ExecStart=@REPO@/bin/update-cli.sh
+TimeoutStartSec=15min

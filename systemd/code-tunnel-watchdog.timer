@@ -1,11 +1,11 @@
 [Unit]
-Description=每 15 分鐘檢查一次 code-tunnel 是否需要重啟
+Description=每 5 分鐘檢查一次 code-tunnel 是否需要重啟
 Documentation=file://@REPO@/README.md
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
-AccuracySec=1min
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
 Unit=code-tunnel-watchdog.service
 
 [Install]

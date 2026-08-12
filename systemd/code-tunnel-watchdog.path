@@ -1,0 +1,15 @@
+[Unit]
+Description=~/code 一被換掉就立刻叫 watchdog（不必等 timer 那一輪）
+Documentation=file://@REPO@/README.md
+
+[Path]
+# 這是 watchdog 的主力觸發來源。實測過的時間差是「更新 16:15 → respawn
+# 16:16:31」只隔 1.5 分鐘，任何以分鐘計的 timer 都追不上，只有 inotify 來得及。
+PathChanged=%h/code
+PathModified=%h/code
+Unit=code-tunnel-watchdog.service
+TriggerLimitIntervalSec=10s
+TriggerLimitBurst=50
+
+[Install]
+WantedBy=paths.target

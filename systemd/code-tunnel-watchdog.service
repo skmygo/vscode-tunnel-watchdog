@@ -1,6 +1,9 @@
 [Unit]
 Description=VS Code tunnel watchdog (偵測 CLI 就地更新造成的雙 host 僵局)
 Documentation=file://@REPO@/README.md
+# path unit 可能在短時間內連續觸發（更新時 binary 會被連續動好幾下），
+# 預設的 start rate limit 會把這支打進 failed 而從此不再啟動 — 關掉。
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

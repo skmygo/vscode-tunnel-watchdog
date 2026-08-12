@@ -1,0 +1,14 @@
+[Unit]
+Description=每週日凌晨檢查並更新 VS Code CLI
+Documentation=file://@REPO@/README.md
+
+[Timer]
+OnCalendar=Sun 04:30
+# 關機錯過就在開機後補跑（腳本自己會避開有人連線的時候）
+Persistent=true
+RandomizedDelaySec=20min
+AccuracySec=1min
+Unit=code-tunnel-update.service
+
+[Install]
+WantedBy=timers.target

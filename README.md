@@ -9,8 +9,12 @@
 （自動挑就近節點，log 裡看得到落在哪個 cluster）。跟機器上其他服務（如 cloudflared）
 完全獨立，互不影響。
 
-這個 repo 附帶一個 **watchdog**，修復 VS Code CLI 自我更新造成的斷線僵局
-（見下方事故紀錄）。tunnel 本體是 VS Code 官方 CLI 的功能，watchdog 是自己加的保險。
+tunnel 本體是 VS Code 官方 CLI 的功能。這個 repo 附帶的是**讓它不會因為 CLI
+自我更新而斷線**的兩層機制（見下方事故紀錄）：
+
+1. **釘住 binary ＋ 受控更新** — `chattr +i ~/code` 讓 CLI 換不動自己，
+   更新改走 `update-cli.sh` 的「停 → 換 → 起」，僵局在物理上不可能形成
+2. **watchdog** — 萬一還是出事（沒釘住、手動裝了新版…）能自動收拾
 
 ---
 
@@ -43,7 +47,9 @@ cd vscode-tunnel-watchdog
 | systemd unit | `code-tunnel.service`（user scope，`code tunnel service install` 產生） |
 | 認證 token | 系統 keyring；keyring 鎖住時自動退回 `~/.vscode/cli/token.json`（600） |
 | Linger | `yes` — 未登入、重開機後服務照樣起來（install.sh 會設） |
-| Watchdog | `code-tunnel-watchdog.timer`，每 15 分鐘一次 |
+| CLI binary 狀態 | `chattr +i`（釘住，CLI 不能就地換掉自己）— `lsattr ~/code` 看得到 `i` |
+| Watchdog | `code-tunnel-watchdog.path`（`~/code` 一變動就秒級觸發）＋ `.timer`（每 5 分鐘兜底） |
+| CLI 更新 | `code-tunnel-update.timer`，每週日 04:30 跑 `update-cli.sh` |
 
 ### 安全邊界
 
@@ -88,10 +94,15 @@ journalctl --user -u code-tunnel-watchdog.service --no-pager -n 50
 # 萬用修復（不需要重新授權）
 systemctl --user restart code-tunnel.service
 
-# watchdog 開關
-systemctl --user list-timers code-tunnel-watchdog.timer
-<repo>/install.sh      # 安裝／重新套用
-<repo>/uninstall.sh    # 移除（不影響 tunnel 本身）
+# 更新 CLI（唯一該用的更新方式，詳見下一節）
+<repo>/bin/update-cli.sh --check    # 只比對版本
+<repo>/bin/update-cli.sh            # 有新版就更新（停 → 換 → 起）
+
+# watchdog／更新機制開關
+systemctl --user list-timers code-tunnel-watchdog.timer code-tunnel-update.timer
+systemctl --user status code-tunnel-watchdog.path
+<repo>/install.sh      # 安裝／重新套用（含釘住 ~/code）
+<repo>/uninstall.sh    # 移除（解開釘住，不影響 tunnel 本身）
 
 # 徹底停用 tunnel
 ~/code tunnel service uninstall      # 停服務，保留這台的註冊
@@ -103,6 +114,58 @@ systemctl --user list-timers code-tunnel-watchdog.timer
 
 ---
 
+## 更新 VS Code CLI
+
+**重點：問題從來不是「新版有 bug」，而是「更新發生在服務執行中」。**
+只要順序變成 **停 → 換 → 起**，舊映像在新 binary 落地前就已經結束，
+雙 host 僵局在物理上不可能形成。
+
+所以這裡做兩件事：
+
+**1. 釘住 binary，讓 CLI 沒辦法偷換自己**
+
+```bash
+sudo chattr +i ~/code      # install.sh 會自動做
+```
+
+immutable 屬性連 rename 都擋 —— CLI 就是靠「把舊檔搬去 `/tmp/.tmpXXXX/old-code-cli`
+再寫新檔」更新的，這一步會直接失敗。CLI 本來就要應付唯讀／離線機器，
+更新失敗只會在 log 留一行錯誤然後繼續跑現行版本。
+
+**2. 更新走 `update-cli.sh`**
+
+```bash
+<repo>/bin/update-cli.sh --check    # 只比對版本，什麼都不動
+<repo>/bin/update-cli.sh            # 有新版就更新
+<repo>/bin/update-cli.sh --force    # 不比對版本、也不管有沒有人連線，直接重裝
+```
+
+它做的事，以及每一步為什麼在那個位置：
+
+| 步驟 | 為什麼 |
+|---|---|
+| 比對 commit，一樣就結束 | 沒事不要動服務 |
+| **有人連線中就跳過** | 換 binary 必須重啟，會踢掉 tunnel 裡所有終端機。寧可這週不更新 |
+| 下載、解壓、跑新 binary 驗 commit —— **全部在停服務之前** | 網路失敗／檔案損毀時，服務根本沒被碰過（實測撞過 429 限流，tunnel 毫髮無傷） |
+| 停服務 → 解鎖 → 備份 → 換檔 → 重新釘住 → 啟動 | 唯一安全的順序 |
+| 等 relay 連上 ＋ 確認 host 數為 1 才算成功 | 「服務起來了」不等於「連得進去」 |
+| 任何一步失敗 → 還原 `~/.vscode/cli/code.prev` 並把服務拉回來 | 寧可停在舊版，不要停在沒有服務 |
+
+實測一次完整更新（1.132.1 → 1.133.0）從頭到尾 **11.7 秒**。
+
+**自動更新**：`code-tunnel-update.timer` 每週日 04:30 跑一次（帶 `Persistent=true`，
+關機錯過會在開機後補跑；有人連線時腳本自己會跳過）。
+
+```bash
+systemctl --user list-timers code-tunnel-update.timer
+journalctl --user -u code-tunnel-update.service --no-pager -n 30
+```
+
+**為什麼不乾脆永遠不更新**：哪天微軟改了 relay 協定，太舊的 CLI 會連不上，
+而你不會收到任何預告。定期在安全時機更新，比「凍在某一版」健康。
+
+---
+
 ## 故障排除
 
 ### 症狀：瀏覽器卡在 "Opening Remote..." 或連不進去
@@ -110,16 +173,18 @@ systemctl --user list-timers code-tunnel-watchdog.timer
 依序做：
 
 ```bash
-# 1. host 行程數 — 正常恆為 1，出現 2 就是雙 host 僵局
-pgrep -af 'tunnel service internal-run'
-#   多出來的那行如果不是 ~/code，是 pgrep 匹配到你自己這條指令，不算數
-#   （watchdog 是用 /proc/<pid>/exe 認的，不會被這種假象騙到）
+# 1. 一次看完 watchdog 的完整判斷（不會動到任何東西）
+<repo>/bin/tunnel-watchdog.sh --dry-run
+#   host_count=1        正常；> 1 就是雙 host 僵局
+#   session_active=0/1  目前有沒有人連著
+#   pinned=yes          ~/code 已釘住，CLI 換不動自己
 
 # 2. 跑的映像跟磁碟上是否一致
 P=$(systemctl --user show code-tunnel.service -p MainPID --value)
 readlink /proc/$P/exe
-#   ~/code            → 正常
-#   ~/code (deleted)  → binary 被就地換掉了，該 restart
+#   ~/code                                 → 正常
+#   ~/code (deleted)                       → binary 被就地換掉了，該 restart
+#   /tmp/.tmpXXXX/old-code-cli (deleted)   → 同上（1.132 系列是這個形式）
 
 # 3. log 裡有沒有這個
 journalctl --user -u code-tunnel.service --no-pager -n 200 | grep NoAttachedServer
@@ -170,25 +235,66 @@ journalctl --user -u code-tunnel.service --no-pager -n 200 | grep NoAttachedServ
 觸發點是 respawn，而 respawn 由「閒置關閉 server」引起 — 所以症狀會延遲很久才出現，
 而且看起來像是「昨天還好好的，今天就連不上」。
 
+### 復發：2026-08-12（watchdog 沒接住）
+
+```
+16:11:19  watchdog：exe=/home/sk/code，正常
+16:15     CLI 就地更新 1.132.0 → 1.132.1
+16:16:31  Extension Host exited code 0 → respawn → 雙 host
+          瀏覽器：The VS Code gateway is not currently running.
+```
+
+跟 08-10 同一個機制，但這次暴露了兩個問題：
+
+1. **規則 2 認不出卡死的舊 host** — 當時 host 計數比對的是 `/proc/<pid>/exe == ~/code`，
+   而舊 host 的 exe 已經變成 `/tmp/.tmppqOTE4/old-code-cli (deleted)`，
+   `host_count` 只算到 1，規則 2 永遠不會開火。改用 `argv[0]` 判定後才抓得到。
+2. **15 分鐘的 timer 追不上 1.5 分鐘的窗口** — 更新到 respawn 只隔 1.5 分鐘，
+   規則 1 根本沒機會預防。改用 inotify（path unit）事件驅動才來得及。
+
+這次修完之後又多了一層：**乾脆讓 CLI 換不動自己**（`chattr +i`），
+更新走 `update-cli.sh`。上面兩條規則從此只是保險。
+
 ---
 
 ## Watchdog 怎麼運作
 
-`bin/tunnel-watchdog.sh`，由 timer 每 15 分鐘叫一次。兩條規則：
+釘住 binary 之後 watchdog 只是保險，但保險要能保。`bin/tunnel-watchdog.sh`
+有兩個觸發來源：
+
+| 觸發來源 | 時機 |
+|---|---|
+| `code-tunnel-watchdog.path` | inotify 盯著 `~/code`，一被動就秒級觸發 —— **主力** |
+| `code-tunnel-watchdog.timer` | 每 5 分鐘兜底，補 path unit 可能漏掉的事件 |
+
+為什麼非要 inotify：實測的時間差是「更新 16:15 → respawn 16:16:31」只隔 **1.5 分鐘**，
+任何以分鐘計的 timer 都追不上，只有事件驅動來得及在僵局形成前介入。
+
+兩條規則：
 
 | 規則 | 條件 | 動作 |
 |---|---|---|
-| 1 預防 | `/proc/<pid>/exe` 帶 `(deleted)` **且** 目前沒有 tunnel session | 趁空檔 restart |
+| 1 預防 | 常駐行程的 exe 已不是 `~/code` **且** 目前沒有 tunnel session | 趁空檔 restart |
 | 2 搶救 | host 行程數 > 1 | 已經壞了，直接 restart |
 
-host 行程數是逐一比對 `/proc/<pid>/exe` 是不是 `~/code` 算出來的，不是只看 cmdline —
-否則任何提到 `tunnel service internal-run` 這串字的指令都會被算成一個 host，
-誤判成僵局而白白 restart（規則 2 不看有沒有人連線，會直接把你踢掉）。
+### 狀態判定為什麼不用 cmdline 比對
 
-規則 1 的「沒人連線」判斷是看 `~/.vscode/cli/servers/*/bin/code-server` 有沒有在跑。
-**有 session 在用時不會打斷你**，只記一行 log 等下一輪。
-如果連續 24 小時都掛著沒斷線、規則 1 一直沒機會執行，那條 tunnel 遲早會撞上
-respawn 而失效 — 這時規則 2 會在 15 分鐘內收拾。
+判定一律以 **服務自己 cgroup 裡有哪些行程** 為準
+（`systemctl show -p ControlGroup` → `/sys/fs/cgroup/.../cgroup.procs`）。
+cgroup 是 systemd 的記帳來源，裡面只會有這個服務 fork 出來的東西，
+你排錯時自己下的 `pgrep` 混不進去。在這個前提下：
+
+- **host 行程**認 `argv[0] == ~/code`。**不能認 `/proc/<pid>/exe`** ——
+  CLI 自我更新時會把舊 binary 搬去 `/tmp/.tmpXXXX/old-code-cli` 再刪掉，
+  卡死的那個舊 host 的 exe 早就不是 `~/code`，用 exe 認會剛好漏掉唯一該抓的對象，
+  規則 2 形同虛設（這是 2026-08-12 那次踩到的坑）。
+- **有沒有人連線**認 exe 落在 `~/.vscode/cli/servers/` 底下的行程（真正在跑的 node server），
+  這個路徑不可能被冒充。
+
+規則 1 **有 session 在用時不會打斷你**，只記一行 log 等下一輪。
+但僵局其實只在 respawn 那一刻形成，而 respawn 的前提是 server 因閒置關閉 ——
+也就是**僵局形成的當下必定沒人連線**，規則 1 下一輪就會收拾。
+規則 2 是給「僵局形成後你又搶先連上來」這種順序準備的。
 
 正常情況下 watchdog 什麼都不做，log 只有一行 `不動作：正常`。
 
@@ -200,13 +306,18 @@ respawn 而失效 — 這時規則 2 會在 15 分鐘內收拾。
 <repo>/
 ├── README.md                              這份文件
 ├── deploy.sh                              一鍵部署（CLI + 登入 + 命名 + watchdog）
-├── install.sh                             安裝 watchdog（產生 unit + 啟用 timer + linger）
-├── uninstall.sh                           移除 watchdog
+├── install.sh                             安裝（產生 unit + 啟用 timer/path + 釘住 ~/code + linger）
+├── uninstall.sh                           移除（含解開釘住）
 ├── bin/
-│   └── tunnel-watchdog.sh                 檢查邏輯，支援 --dry-run
+│   ├── tunnel-state.sh                    共用狀態判定（cgroup 掃描），被下面兩支 source
+│   ├── tunnel-watchdog.sh                 檢查邏輯，支援 --dry-run
+│   └── update-cli.sh                      受控更新（停 → 換 → 起），支援 --check / --force
 └── systemd/
     ├── code-tunnel-watchdog.service       oneshot（模板，@REPO@ 由 install.sh 代入）
-    └── code-tunnel-watchdog.timer         每 15 分鐘（模板）
+    ├── code-tunnel-watchdog.timer         每 5 分鐘兜底
+    ├── code-tunnel-watchdog.path          inotify 盯著 ~/code
+    ├── code-tunnel-update.service         oneshot，跑 update-cli.sh
+    └── code-tunnel-update.timer           每週日 04:30
 ```
 
 `code-tunnel.service` 本身是 `code tunnel service install` 產生的，
